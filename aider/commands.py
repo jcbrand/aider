@@ -1169,6 +1169,67 @@ class Commands:
     def completions_context(self):
         raise CommandCompletionException()
 
+
+    def completions_raw_run(self, document, complete_event):
+        """Advanced shell command completion with argument support"""
+        from prompt_toolkit.completion import Completion
+        import subprocess
+        import shlex
+        import os
+
+        text = document.text_before_cursor
+
+        try:
+            # Parse command after /run or !
+            if text.startswith("/run "):
+                cmd_text = text[5:]  # Remove '/run '
+            elif text.startswith("!"):
+                cmd_text = text[1:]  # Remove '!'
+            else:
+                return
+
+            parts = shlex.split(cmd_text)
+
+            if len(parts) <= 1:
+                # Complete the command itself
+                bash_command = f"compgen -A command -- {shlex.quote(cmd_text)}"
+                result = subprocess.run(["bash", "-c", bash_command], capture_output=True, text=True)
+
+                if result.returncode == 0:
+                    completions = result.stdout.strip().split("\n")
+                    for completion in completions:
+                        if completion:
+                            yield Completion(completion, start_position=-len(cmd_text))
+                else:
+                    # Fallback to basic completion if bash command fails
+                    commands = ["git", "ls", "cat", "grep", "find", "python", "npm", "pytest", "pip", "docker", "make", "cd", "pwd", "echo", "rm", "cp", "mv"]
+                    current = parts[0] if parts else ""
+                    for cmd in commands:
+                        if cmd.startswith(current):
+                            yield Completion(cmd, start_position=-len(current))
+            else:
+                # Complete files and directories
+                current_path = os.path.expanduser(parts[-1]) if parts[-1] else "."
+                file_prefix = os.path.basename(current_path)
+                dir_path = os.path.dirname(current_path) or "."
+
+                try:
+                    files = os.listdir(dir_path)
+                    for file in files:
+                        if file.startswith(file_prefix):
+                            full_path = os.path.join(dir_path, file)
+                            if os.path.isdir(full_path):
+                                file += "/"
+                            completion = os.path.join(os.path.dirname(current_path), file)
+                            yield Completion(completion, start_position=-len(parts[-1]))
+                except OSError:
+                    # Handle cases where the directory is not accessible
+                    pass
+
+        except (subprocess.SubprocessError, ValueError, IndexError):
+            # Fall back gracefully
+            pass
+
     def cmd_ask(self, args):
         """Ask questions about the code base without editing any files. If no prompt provided, switches to ask mode."""  # noqa
         return self._generic_chat_command(args, "ask")
