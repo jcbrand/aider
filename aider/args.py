@@ -849,6 +849,23 @@ def get_parser(default_config_files, git_root):
         "--editor",
         help="Specify which editor to use for the /editor command",
     )
+    group.add_argument(
+        "--plugin",
+        action="append",
+        metavar="PLUGIN_FILE",
+        help="Specify a plugin file to load (can be used multiple times)",
+        default=[],
+    ).complete = shtab.FILE
+    group.add_argument(
+        "--plugins-dir",
+        action="append",
+        metavar="PLUGINS_DIR",
+        help=(
+            "Specify a directory to load plugins from (can be used multiple times). "
+            "Default: ~/.aider/plugins and .aider/plugins"
+        ),
+        default=[],
+    ).complete = shtab.DIRECTORY
 
     supported_shells_list = sorted(list(shtab.SUPPORTED_SHELLS))
     group.add_argument(

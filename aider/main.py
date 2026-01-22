@@ -409,6 +409,54 @@ def register_litellm_models(git_root, model_metadata_fname, io, verbose=False):
         return 1
 
 
+def load_plugins(args, git_root, io, verbose=False):
+    """
+    Load plugins from specified files and directories.
+
+    Plugins are loaded from:
+    1. Files specified via --plugin argument
+    2. Directories specified via --plugins-dir argument
+    3. Default directories: ~/.aider/plugins and .aider/plugins (if they exist)
+    """
+    from aider.commands import discover_plugins_in_directory, load_plugin_from_file
+
+    plugins = []
+
+    # Load individual plugin files specified via --plugin
+    plugin_files = getattr(args, "plugin", []) or []
+    for plugin_file in plugin_files:
+        plugin = load_plugin_from_file(plugin_file, io)
+        if plugin:
+            plugins.append(plugin)
+            if verbose:
+                io.tool_output(f"Loaded plugin: {plugin['name']} from {plugin['path']}")
+
+    # Collect plugin directories
+    plugin_dirs = list(getattr(args, "plugins_dir", []) or [])
+
+    # Add default plugin directories if they exist
+    default_dirs = [
+        Path.home() / ".aider" / "plugins",
+    ]
+    if git_root:
+        default_dirs.append(Path(git_root) / ".aider" / "plugins")
+    default_dirs.append(Path.cwd() / ".aider" / "plugins")
+
+    for default_dir in default_dirs:
+        if default_dir.exists() and default_dir.is_dir() and str(default_dir) not in plugin_dirs:
+            plugin_dirs.append(str(default_dir))
+
+    # Load plugins from directories
+    for plugin_dir in plugin_dirs:
+        dir_plugins = discover_plugins_in_directory(plugin_dir, io)
+        for plugin in dir_plugins:
+            plugins.append(plugin)
+            if verbose:
+                io.tool_output(f"Loaded plugin: {plugin['name']} from {plugin['path']}")
+
+    return plugins
+
+
 def sanity_check_repo(repo, io):
     if not repo:
         return True
@@ -932,6 +980,9 @@ def main(argv=None, input=None, output=None, force_git_root=None, return_coder=F
     else:
         analytics.event("no-repo")
 
+    # Load plugins
+    plugins = load_plugins(args, git_root, io, verbose=args.verbose)
+
     commands = Commands(
         io,
         None,
@@ -944,6 +995,7 @@ def main(argv=None, input=None, output=None, force_git_root=None, return_coder=F
         verbose=args.verbose,
         editor=args.editor,
         original_read_only_fnames=read_only_fnames,
+        plugins=plugins,
     )
 
     summarizer = ChatSummary(

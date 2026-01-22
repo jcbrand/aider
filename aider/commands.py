@@ -1,9 +1,11 @@
 import glob
+import importlib.util
 import os
 import re
 import subprocess
 import sys
 import tempfile
+import traceback
 from collections import OrderedDict
 from os.path import expanduser
 from pathlib import Path
@@ -27,6 +29,83 @@ from aider.utils import is_image_file
 from .dump import dump  # noqa: F401
 
 
+def load_plugin_from_file(plugin_path, io=None):
+    """
+    Load a plugin from a Python file.
+
+    A plugin file can contain:
+    - cmd_<name>(commands, args) functions that become /<name> commands
+    - completions_<name>(commands) functions that provide tab completions
+    - completions_raw_<name>(commands, document, complete_event) for raw completions
+    - An optional __plugin_name__ string for display purposes
+
+    Returns a dict with 'commands', 'completions', 'completions_raw', and 'name' keys.
+    """
+    plugin_path = Path(plugin_path)
+    if not plugin_path.exists():
+        if io:
+            io.tool_error(f"Plugin file not found: {plugin_path}")
+        return None
+
+    if not plugin_path.suffix == ".py":
+        if io:
+            io.tool_error(f"Plugin file must be a .py file: {plugin_path}")
+        return None
+
+    try:
+        spec = importlib.util.spec_from_file_location(plugin_path.stem, plugin_path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+    except Exception as e:
+        if io:
+            io.tool_error(f"Error loading plugin {plugin_path}: {e}")
+            if io.verbose:
+                io.tool_error(traceback.format_exc())
+        return None
+
+    plugin = {
+        "name": getattr(module, "__plugin_name__", plugin_path.stem),
+        "path": str(plugin_path),
+        "commands": {},
+        "completions": {},
+        "completions_raw": {},
+    }
+
+    for attr_name in dir(module):
+        attr = getattr(module, attr_name)
+        if not callable(attr):
+            continue
+
+        if attr_name.startswith("cmd_"):
+            cmd_name = attr_name[4:]
+            plugin["commands"][cmd_name] = attr
+        elif attr_name.startswith("completions_raw_"):
+            cmd_name = attr_name[16:]
+            plugin["completions_raw"][cmd_name] = attr
+        elif attr_name.startswith("completions_"):
+            cmd_name = attr_name[12:]
+            plugin["completions"][cmd_name] = attr
+
+    return plugin
+
+
+def discover_plugins_in_directory(directory, io=None):
+    """Discover all plugin files in a directory."""
+    directory = Path(directory)
+    if not directory.exists() or not directory.is_dir():
+        return []
+
+    plugins = []
+    for plugin_file in sorted(directory.glob("*.py")):
+        if plugin_file.name.startswith("_"):
+            continue  # Skip __init__.py, __pycache__, etc.
+        plugin = load_plugin_from_file(plugin_file, io)
+        if plugin:
+            plugins.append(plugin)
+
+    return plugins
+
+
 class SwitchCoder(Exception):
     def __init__(self, placeholder=None, **kwargs):
         self.kwargs = kwargs
@@ -48,6 +127,7 @@ class Commands:
             verbose=self.verbose,
             editor=self.editor,
             original_read_only_fnames=self.original_read_only_fnames,
+            plugins=self.plugins,
         )
 
     def __init__(
@@ -63,6 +143,7 @@ class Commands:
         verbose=False,
         editor=None,
         original_read_only_fnames=None,
+        plugins=None,
     ):
         self.io = io
         self.coder = coder
@@ -83,6 +164,26 @@ class Commands:
 
         # Store the original read-only filenames provided via args.read
         self.original_read_only_fnames = set(original_read_only_fnames or [])
+
+        # Load plugins
+        self.plugins = plugins if plugins is not None else []
+        self._plugin_commands = {}
+        self._plugin_completions = {}
+        self._plugin_completions_raw = {}
+
+        for plugin in self.plugins:
+            for cmd_name, cmd_func in plugin.get("commands", {}).items():
+                if cmd_name in self._plugin_commands:
+                    if io:
+                        io.tool_warning(
+                            f"Plugin command /{cmd_name} from {plugin['name']} "
+                            f"overrides existing plugin command"
+                        )
+                self._plugin_commands[cmd_name] = cmd_func
+            for cmd_name, comp_func in plugin.get("completions", {}).items():
+                self._plugin_completions[cmd_name] = comp_func
+            for cmd_name, comp_func in plugin.get("completions_raw", {}).items():
+                self._plugin_completions_raw[cmd_name] = comp_func
 
     def cmd_model(self, args):
         "Switch the Main Model to a new LLM"
@@ -260,6 +361,16 @@ class Commands:
         cmd = cmd[1:]
         cmd = cmd.replace("-", "_")
 
+        # Check for plugin raw completions first
+        if cmd in self._plugin_completions_raw:
+            # Wrap the plugin completion to pass self as first arg
+            plugin_completer = self._plugin_completions_raw[cmd]
+
+            def wrapped_completer(document, complete_event):
+                return plugin_completer(self, document, complete_event)
+
+            return wrapped_completer
+
         raw_completer = getattr(self, f"completions_raw_{cmd}", None)
         return raw_completer
 
@@ -268,6 +379,14 @@ class Commands:
         cmd = cmd[1:]
 
         cmd = cmd.replace("-", "_")
+
+        # Check for plugin completions first
+        if cmd in self._plugin_completions:
+            result = self._plugin_completions[cmd](self)
+            if result:
+                return sorted(result)
+            return
+
         fun = getattr(self, f"completions_{cmd}", None)
         if not fun:
             return
@@ -282,10 +401,30 @@ class Commands:
             cmd = cmd.replace("_", "-")
             commands.append("/" + cmd)
 
+        # Add plugin commands
+        for cmd_name in self._plugin_commands:
+            cmd = cmd_name.replace("_", "-")
+            cmd = "/" + cmd
+            if cmd not in commands:
+                commands.append(cmd)
+
         return commands
 
     def do_run(self, cmd_name, args):
         cmd_name = cmd_name.replace("-", "_")
+
+        # Check for plugin command first
+        if cmd_name in self._plugin_commands:
+            try:
+                return self._plugin_commands[cmd_name](self, args)
+            except ANY_GIT_ERROR as err:
+                self.io.tool_error(f"Unable to complete {cmd_name}: {err}")
+            except Exception as err:
+                self.io.tool_error(f"Plugin command error: {err}")
+                if self.verbose:
+                    self.io.tool_error(traceback.format_exc())
+            return
+
         cmd_method_name = f"cmd_{cmd_name}"
         cmd_method = getattr(self, cmd_method_name, None)
         if not cmd_method:
@@ -1090,19 +1229,33 @@ class Commands:
         for file in chat_files:
             self.io.tool_output(f"  {file}")
 
+    def _get_command_description(self, cmd):
+        """Get the description for a command, checking both built-in and plugin commands."""
+        cmd_name = cmd[1:].replace("-", "_")
+
+        # Check plugin commands first
+        if cmd_name in self._plugin_commands:
+            doc = self._plugin_commands[cmd_name].__doc__
+            return doc if doc else "Plugin command"
+
+        # Check built-in commands
+        cmd_method = getattr(self, f"cmd_{cmd_name}", None)
+        if cmd_method:
+            return cmd_method.__doc__
+
+        return None
+
     def basic_help(self):
         commands = sorted(self.get_commands())
         pad = max(len(cmd) for cmd in commands)
         pad = "{cmd:" + str(pad) + "}"
         for cmd in commands:
-            cmd_method_name = f"cmd_{cmd[1:]}".replace("-", "_")
-            cmd_method = getattr(self, cmd_method_name, None)
-            cmd = pad.format(cmd=cmd)
-            if cmd_method:
-                description = cmd_method.__doc__
-                self.io.tool_output(f"{cmd} {description}")
+            description = self._get_command_description(cmd)
+            cmd_formatted = pad.format(cmd=cmd)
+            if description:
+                self.io.tool_output(f"{cmd_formatted} {description}")
             else:
-                self.io.tool_output(f"{cmd} No description available.")
+                self.io.tool_output(f"{cmd_formatted} No description available.")
         self.io.tool_output()
         self.io.tool_output("Use `/help <question>` to ask questions about how to use aider.")
 
@@ -1281,10 +1434,8 @@ class Commands:
 """
         commands = sorted(self.get_commands())
         for cmd in commands:
-            cmd_method_name = f"cmd_{cmd[1:]}".replace("-", "_")
-            cmd_method = getattr(self, cmd_method_name, None)
-            if cmd_method:
-                description = cmd_method.__doc__
+            description = self._get_command_description(cmd)
+            if description:
                 res += f"| **{cmd}** | {description} |\n"
             else:
                 res += f"| **{cmd}** | |\n"
@@ -1457,6 +1608,32 @@ class Commands:
             )
         else:
             self.io.tool_output(f"No new files added from directory {original_name}.")
+
+    def cmd_plugins(self, args):
+        "List all loaded plugins and their commands"
+        if not self.plugins:
+            self.io.tool_output("No plugins loaded.")
+            self.io.tool_output()
+            self.io.tool_output("To load plugins, use:")
+            self.io.tool_output("  --plugin <file.py>     Load a specific plugin file")
+            self.io.tool_output("  --plugins-dir <dir>    Load all plugins from a directory")
+            self.io.tool_output()
+            self.io.tool_output("Default plugin directories (if they exist):")
+            self.io.tool_output("  ~/.aider/plugins/")
+            self.io.tool_output("  .aider/plugins/")
+            return
+
+        self.io.tool_output("Loaded plugins:\n")
+        for plugin in self.plugins:
+            self.io.tool_output(f"  {plugin['name']}:")
+            self.io.tool_output(f"    Path: {plugin['path']}")
+            if plugin.get("commands"):
+                cmds = ", ".join(f"/{c.replace('_', '-')}" for c in plugin["commands"].keys())
+                self.io.tool_output(f"    Commands: {cmds}")
+            if plugin.get("completions"):
+                comps = ", ".join(plugin["completions"].keys())
+                self.io.tool_output(f"    Completions: {comps}")
+            self.io.tool_output()
 
     def cmd_map(self, args):
         "Print out the current repository map"
