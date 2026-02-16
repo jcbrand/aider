@@ -419,6 +419,8 @@ class Commands:
                 return self._plugin_commands[cmd_name](self, args)
             except ANY_GIT_ERROR as err:
                 self.io.tool_error(f"Unable to complete {cmd_name}: {err}")
+            except SwitchCoder:
+                raise
             except Exception as err:
                 self.io.tool_error(f"Plugin command error: {err}")
                 if self.verbose:

@@ -44,6 +44,7 @@ Example Usage
     aider --plugin examples/plugins/example_prose.py my_document.md
 
 Then in aider:
+    /prose              (enters sticky prose editing mode via /ask)
     /prose improve the clarity of the introduction
     /grammar check for errors
     /plugins
@@ -56,16 +57,10 @@ __plugin_name__ = "prose"
 def cmd_prose(commands, args):
     """Edit prose with focus on clarity, style, and readability"""
     if not args.strip():
-        commands.io.tool_output(
-            "Usage: /prose <instructions>\n\n"
-            "Examples:\n"
-            "  /prose improve the clarity of chapter 1\n"
-            "  /prose fix grammar and punctuation\n"
-            "  /prose make the introduction more engaging\n"
-            "  /prose simplify complex sentences\n"
-            "  /prose reduce wordiness in the conclusion"
-        )
-        return
+        commands.io.tool_output("Entering prose mode.")
+        commands.io.tool_output("Your prompts will be interpreted as prose editing requests.")
+        commands.io.tool_output("Use /code or /architect to return to code editing mode.")
+        return commands.cmd_chat_mode("ask")
 
     if not commands.coder:
         commands.io.tool_error("No active coder session.")
