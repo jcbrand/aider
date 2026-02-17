@@ -224,6 +224,7 @@ class Commands:
         models.sanity_check_models(self.io, model)
         raise SwitchCoder(main_model=model)
 
+
     def cmd_weak_model(self, args):
         "Switch the Weak Model to a new LLM"
 
@@ -306,6 +307,8 @@ class Commands:
     def completions_model(self):
         models = litellm.model_cost.keys()
         return models
+
+    completions_weak_model = completions_model
 
     def cmd_models(self, args):
         "Search the list of available models"
