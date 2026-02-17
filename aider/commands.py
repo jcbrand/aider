@@ -354,7 +354,7 @@ class Commands:
         ]
 
     def is_command(self, inp):
-        return inp[0] in "/!"
+        return inp[0] in "/!#"
 
     def get_raw_completions(self, cmd):
         assert cmd.startswith("/")
@@ -451,6 +451,9 @@ class Commands:
         return matching_commands, first_word, rest_inp
 
     def run(self, inp):
+        if inp.startswith("#"):
+            return
+
         if inp.startswith("!"):
             self.coder.event("command_run")
             return self.do_run("run", inp[1:])
